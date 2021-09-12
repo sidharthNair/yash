@@ -19,10 +19,8 @@ struct job
 {
     char *jstr;
     int status;
+    int background;
     pid_t pgid;
-    pid_t lpid;
-    pid_t rpid;
-    struct job *head;
     struct job *next;
     int pipe;
 } typedef job_t;
@@ -50,21 +48,21 @@ void redirect(char **argv)
         if (!strcmp(token, "<"))
         {
             *(argv++) = NULL;
-            int new_stdin = open(*(argv++), O_RDONLY | O_CREAT, S_IRWXU);
+            int new_stdin = open(*(argv++), O_RDONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
             dup2(new_stdin, 0);
             close(new_stdin);
         }
         else if (!strcmp(token, ">"))
         {
             *(argv++) = NULL;
-            int new_stdout = open(*(argv++), O_WRONLY | O_CREAT, S_IRWXU);
+            int new_stdout = open(*(argv++), O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
             dup2(new_stdout, 1);
             close(new_stdout);
         }
         else if (!strcmp(token, "2>"))
         {
             *(argv++) = NULL;
-            int new_stderr = open(*(argv++), O_WRONLY | O_CREAT, S_IRWXU);
+            int new_stderr = open(*(argv++), O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
             dup2(new_stderr, 2);
             close(new_stderr);
         }
@@ -87,9 +85,7 @@ void execute_reg(char **argv, job_t *j)
     }
     else
     {
-        j->lpid = pid;
         wait((int *)NULL);
-        tcsetpgrp(shell_job->pgid, 1);
     }
 }
 
@@ -100,60 +96,84 @@ void execute_pipe(char **argv, job_t *j)
     int child1 = fork();
     if (child1 == 0)
     {
-        redirect(argv);
         dup2(pipefd[1], 1);
         close(pipefd[0]);
+        redirect(argv);
         execvp(*argv, argv);
     }
-    j->lpid = child1;
     int child2 = fork();
     if (child2 == 0)
     {
-        redirect(argv + (j->pipe + 1));
         dup2(pipefd[0], 0);
         close(pipefd[1]);
+        redirect(argv + (j->pipe + 1));
         execvp(*(argv + (j->pipe + 1)), (argv + (j->pipe + 1)));
     }
     else
     {
-        j->rpid = child2;
         close(pipefd[0]);
         close(pipefd[1]);
         waitpid(child1, NULL, 0);
         waitpid(child2, NULL, 0);
-        j->status = TERMINATED;
-        tcsetpgrp(shell_job->pgid, 1);
     }
 }
 
-void create_job(char *input)
+void update_status(job_t *j, int blocking)
+{
+    int status;
+    waitpid(j->pgid, &status, blocking ? WUNTRACED : WUNTRACED | WNOHANG);
+    if (WIFEXITED(status) || (WIFSIGNALED(status) && !WIFSTOPPED(status)))
+    {
+        printf("%d\n", WEXITSTATUS(status));
+        j->status = TERMINATED;
+    }
+    else if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTSTP)
+    {
+        j->status = STOPPED;
+    }
+}
+
+void start_job(char *input)
 {
     job_t *j = malloc(sizeof(job_t));
     job_t *next = shell_job;
-    while (next->next != NULL)
+    while (next->next)
     {
         next = next->next;
     }
     next->next = j;
+    j->jstr = strdup(input);
+    char *argv[64];
+    int length = tokenize(input, argv);
+    if (!strcmp(argv[length - 1], "&"))
+    {
+        argv[length-- - 1] = NULL;
+        j->background = 1;
+    }
+    else
+    {
+        argv[length] = NULL;
+    }
+    for (int i = 0; i < length; i++)
+    {
+        if (!strcmp(argv[i], "|"))
+        {
+            argv[i] = NULL;
+            j->pipe = i;
+        }
+    }
     int pgid = fork();
     if (pgid == 0)
     {
         setpgid(0, 0);
-        j->jstr = strdup(input);
-        j->pgid = getpid();
-        j->status = RUNNING;
-        char *argv[64];
-        int length = tokenize(input, argv);
-        argv[length] = NULL;
-        j->pipe = 0;
-        for (int i = 0; i < length; i++)
-        {
-            if (!strcmp(argv[i], "|"))
-            {
-                argv[i] = NULL;
-                j->pipe = i;
-            }
-        }
+
+        signal(SIGTTOU, SIG_DFL);
+        signal(SIGTTIN, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTSTP, SIG_DFL);
+        signal(SIGQUIT, SIG_DFL);
+        signal(SIGCHLD, SIG_DFL);
+
         if (j->pipe)
         {
             execute_pipe(argv, j);
@@ -162,27 +182,99 @@ void create_job(char *input)
         {
             execute_reg(argv, j);
         }
+        exit(0);
     }
     else
     {
-        tcsetpgrp(pgid, 1);
+        j->pgid = pgid;
+        j->status = RUNNING;
+        if (!j->background)
+        {
+            tcsetpgrp(STDIN_FILENO, pgid);
+            update_status(j, 1);
+            tcsetpgrp(STDIN_FILENO, shell_job->pgid);
+        }
     }
+}
+
+void update_jobs()
+{
+    job_t *current = shell_job->next;
+    while (current != NULL)
+    {
+        if (current->status == RUNNING)
+        {
+            update_status(current, 0);
+        }
+        current = current->next;
+    }
+}
+
+void fg()
+{
+    job_t *current = shell_job->next;
+    job_t *recent_fg_job;
+    while (current != NULL) {
+        if (current->status == STOPPED || current->background) {
+            recent_fg_job = current;
+        }
+        current = current->next;
+    }
+    if (recent_fg_job == NULL) return;
+    kill(-recent_fg_job->pgid, SIGCONT);
+    tcsetpgrp(STDIN_FILENO, recent_fg_job->pgid);
+    update_status(recent_fg_job, 1);
+    tcsetpgrp(STDIN_FILENO, shell_job->pgid);
+}
+
+void bg()
+{
+    job_t *current = shell_job->next;
+    job_t *recent_bg_job;
+    while (current != NULL) {
+        if (current->status == STOPPED) {
+            recent_bg_job = current;
+        }
+        current = current->next;
+    }
+    if (recent_bg_job == NULL) return;
+    kill(-recent_bg_job->pgid, SIGCONT);
 }
 
 void print_jobs()
 {
     job_t *current = shell_job->next;
     int i = 1;
-    while (current != NULL)
+    while (current)
     {
-        printf("[%d] - %s\t%s\n", i++, current->status == RUNNING ? "Running" : "Stopped", current->jstr);
+        char *status;
+        switch (current->status)
+        {
+        case RUNNING:
+            status = "Running";
+            break;
+        case STOPPED:
+            status = "Stopped";
+            break;
+        case TERMINATED:
+            status = "Done";
+        }
+        printf("[%d] - %s\t%s\n", i++, status, current->jstr);
+        current = current->next;
     }
 }
 
 int main(void)
 {
     signal(SIGTTOU, SIG_IGN);
+    signal(SIGTTIN, SIG_IGN);
+    signal(SIGINT, SIG_IGN);
+    signal(SIGTSTP, SIG_IGN);
+    signal(SIGQUIT, SIG_IGN);
+    signal(SIGCHLD, SIG_IGN);
+
     pid_t s_pid = getpid();
+    setpgid(0, 0);
     shell_job = malloc(sizeof(job_t));
     shell_job->status = RUNNING;
     shell_job->pgid = s_pid;
@@ -190,15 +282,25 @@ int main(void)
     {
         write(1, "# ", 2);
         char input[2048];
-        fgets(input, 2048, stdin);
+        if (fgets(input, 2048, stdin) == NULL)
+            exit(1);
+        update_jobs();
         input[strcspn(input, "\n")] = '\0';
         if (!strcmp(input, "jobs"))
         {
             print_jobs();
         }
+        else if (!strcmp(input, "fg"))
+        {
+            fg();
+        }
+        else if (!strcmp(input, "bg"))
+        {
+            bg();
+        }
         else
         {
-            create_job(input);
+            start_job(input);
         }
     }
     return 0;
