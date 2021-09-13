@@ -49,7 +49,11 @@ void redirect(char **argv)
         if (!strcmp(token, "<"))
         {
             *(argv++) = NULL;
-            int new_stdin = open(*(argv++), O_RDONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
+            int new_stdin = open(*(argv++), O_RDONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
+            if (new_stdin == -1) {
+                perror("Input file not found");
+                exit(1);
+            }
             dup2(new_stdin, 0);
             close(new_stdin);
         }
@@ -136,21 +140,25 @@ void update_status(job_t *j, int blocking)
         }
     }
 }
+void print_linked_list();
 
 void start_job(char *input)
 {
     job_t *j = malloc(sizeof(job_t));
-    job_t *next = shell_job;
+    job_t *current = shell_job;
     int job_num = 1;
-    while (next->next)
+    while (current->next)
     {
-        next = next->next;
-        if (!(next->status == TERMINATED && !next->background))
-            job_num = next->job_num + 1;
+        current = current->next;
+        if (!(current->status == TERMINATED && !current->background))
+            job_num = current->job_num + 1;
     }
-    next->next = j;
+    current->next = j;
     j->jstr = strdup(input);
     j->job_num = job_num;
+    j->next = NULL;
+    j->pipe = 0;
+    j->background = 0;
     char *argv[64];
     int length = tokenize(input, argv);
     if (!strcmp(argv[length - 1], "&"))
@@ -205,6 +213,16 @@ void start_job(char *input)
     }
 }
 
+void print_linked_list() {
+    job_t* current = shell_job;
+    printf("\n\n");
+    while (current) {
+        printf("%d - %s %d\n", current->job_num, current->jstr, current->status);
+        current = current->next;
+    }
+    printf("null\n\n");
+}
+
 void update_jobs()
 {
     job_t *previous = shell_job;
@@ -220,7 +238,7 @@ void update_jobs()
         else if (j->status == RUNNING)
         {
             update_status(j, 0);
-            previous = j;
+            previous = previous->next;
         }
         else {
             previous = previous->next;
@@ -334,6 +352,7 @@ int main(void)
     shell_job = malloc(sizeof(job_t));
     shell_job->status = RUNNING;
     shell_job->pgid = s_pid;
+    shell_job->jstr = "shell";
     while (1)
     {
         write(1, "# ", 2);
