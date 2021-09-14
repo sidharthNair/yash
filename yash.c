@@ -26,6 +26,30 @@ struct job {
 
 job_t *shell_job;
 
+int tokenize(char *input, char **tokens);
+void redirect(char **argv);
+void execute_reg(char **argv, job_t *j);
+void execute_pipe(char **argv, job_t *j);
+void start_job(char *input);
+void update_status(job_t *j, int blocking);
+void update_jobs();
+void fg();
+void bg();
+void jobs(int done_flag);
+void cleanup();
+
+// FOR DEBUGGING PURPOSES, prints jobs list
+void print_linked_list() {
+    job_t *current = shell_job;
+    printf("\n\n");
+    while (current) {
+        printf("%d - %s %d\n", current->job_num, current->jstr, current->status);
+        current = current->next;
+    }
+    printf("null\n\n");
+}
+
+// tokenizes string by spaces, returns length of tokens array
 int tokenize(char *input, char **tokens) {
     int length = 0;
     *tokens = strtok(input, " ");
@@ -37,25 +61,38 @@ int tokenize(char *input, char **tokens) {
     return length;
 }
 
+// searches for redirect identifiers and performs the redirection accordingly
 void redirect(char **argv) {
     char *token = *argv;
+    int in_counter, out_counter, err_counter = 0;
     while (token) {
         if (!strcmp(token, "<")) {
+            in_counter++;
             *(argv++) = NULL;
+            if (!*argv) {
+                exit(1);
+            }
             int new_stdin = open(*(argv++), O_RDONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
             if (new_stdin == -1) {
-                perror("Input file not found");
                 exit(1);
             }
             dup2(new_stdin, 0);
             close(new_stdin);
         } else if (!strcmp(token, ">")) {
+            out_counter++;
             *(argv++) = NULL;
+            if (!*argv) {
+                exit(1);
+            }
             int new_stdout = open(*(argv++), O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
             dup2(new_stdout, 1);
             close(new_stdout);
         } else if (!strcmp(token, "2>")) {
+            err_counter++;
             *(argv++) = NULL;
+            if (!*argv) {
+                exit(1);
+            }
             int new_stderr = open(*(argv++), O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
             dup2(new_stderr, 2);
             close(new_stderr);
@@ -64,8 +101,12 @@ void redirect(char **argv) {
         }
         token = *argv;
     }
+    if (in_counter > 1 || out_counter > 1 || err_counter > 1) {
+        exit(1);
+    }
 }
 
+// executes command without pipe
 void execute_reg(char **argv, job_t *j) {
     int pid = fork();
     if (pid == 0) {
@@ -77,6 +118,7 @@ void execute_reg(char **argv, job_t *j) {
     }
 }
 
+// executes command with pipe
 void execute_pipe(char **argv, job_t *j) {
     int pipefd[2];
     pipe(pipefd);
@@ -103,34 +145,14 @@ void execute_pipe(char **argv, job_t *j) {
     }
 }
 
-void update_status(job_t *j, int blocking) {
-    int status;
-    if (waitpid(j->pgid, &status, blocking ? WUNTRACED : WUNTRACED | WNOHANG)) {
-        if (WIFEXITED(status) || (WIFSIGNALED(status) && !WIFSTOPPED(status))) {
-            j->status = TERMINATED;
-        } else if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTSTP) {
-            j->status = STOPPED;
-        }
-    }
-}
-void print_linked_list();
-
+// creates and starts a job with given command
 void start_job(char *input) {
     job_t *j = malloc(sizeof(job_t));
-    job_t *current = shell_job;
-    int job_num = 1;
-    while (current->next) {
-        current = current->next;
-        if (!(current->status == TERMINATED && !current->background))
-            job_num = current->job_num + 1;
-    }
-    current->next = j;
     j->jstr = strdup(input);
-    j->job_num = job_num;
     j->next = NULL;
     j->pipe = 0;
     j->background = 0;
-    char *argv[64];
+    char *argv[128];
     int length = tokenize(input, argv);
     if (!strcmp(argv[length - 1], "&")) {
         argv[length-- - 1] = NULL;
@@ -140,14 +162,30 @@ void start_job(char *input) {
     }
     for (int i = 0; i < length; i++) {
         if (!strcmp(argv[i], "|")) {
+            if (j->pipe) {  // multiple pipes found, invalid command
+                free(j->jstr);
+                free(j);
+                return;
+            }
             argv[i] = NULL;
             j->pipe = i;
         }
     }
+    job_t *current = shell_job;
+    int job_num = 1;
+    while (current->next) {
+        current = current->next;
+        if (!(current->status == TERMINATED && !current->background)) {
+            job_num = current->job_num + 1;
+        }
+    }
+    current->next = j;
+    j->job_num = job_num;
     int pgid = fork();
     if (pgid == 0) {
         setpgid(0, 0);
 
+        //default signal behavior
         signal(SIGTTOU, SIG_DFL);
         signal(SIGTTIN, SIG_DFL);
         signal(SIGINT, SIG_DFL);
@@ -172,17 +210,19 @@ void start_job(char *input) {
     }
 }
 
-// FOR DEBUGGING PURPOSES
-void print_linked_list() {
-    job_t *current = shell_job;
-    printf("\n\n");
-    while (current) {
-        printf("%d - %s %d\n", current->job_num, current->jstr, current->status);
-        current = current->next;
+// updates status of jobs, blocking flag is used if the process using it is a foreground process
+void update_status(job_t *j, int blocking) {
+    int status;
+    if (waitpid(j->pgid, &status, blocking ? WUNTRACED : WUNTRACED | WNOHANG)) {
+        if (WIFEXITED(status) || (WIFSIGNALED(status) && !WIFSTOPPED(status))) {
+            j->status = TERMINATED;
+        } else if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTSTP) {
+            j->status = STOPPED;
+        }
     }
-    printf("null\n\n");
 }
 
+// updates statuses of all running jobs, removes terminated jobs from job list
 void update_jobs() {
     job_t *previous = shell_job;
     job_t *j = shell_job->next;
@@ -201,6 +241,7 @@ void update_jobs() {
     }
 }
 
+// brings most recently stopped or backgrounded process to the foreground
 void fg() {
     job_t *j = shell_job->next;
     job_t *recent_fg_job;
@@ -228,6 +269,7 @@ void fg() {
     tcsetpgrp(STDIN_FILENO, shell_job->pgid);
 }
 
+// starts up most recently stopped process in the background
 void bg() {
     job_t *j = shell_job->next;
     job_t *recent_bg_job;
@@ -244,16 +286,17 @@ void bg() {
     if (recent_bg_job == NULL)
         return;
     if (recent_bg_job->jstr[strlen(recent_bg_job->jstr) - 1] == '&') {
-        printf("[%d]%c %s\n", recent_bg_job->job_num, recent_bg_job == recent_fg_job ? '+' : '-', recent_bg_job->jstr);
+        printf("[%d]%c  %s\n", recent_bg_job->job_num, recent_bg_job == recent_fg_job ? '+' : '-', recent_bg_job->jstr);
     } else {
-        printf("[%d]%c %s &\n", recent_bg_job->job_num, recent_bg_job == recent_fg_job ? '+' : '-', recent_bg_job->jstr);
+        printf("[%d]%c  %s &\n", recent_bg_job->job_num, recent_bg_job == recent_fg_job ? '+' : '-', recent_bg_job->jstr);
     }
     recent_bg_job->status = RUNNING;
     recent_bg_job->background = 1;
     kill(-recent_bg_job->pgid, SIGCONT);
 }
 
-void print_jobs(int done_flag) {
+// prints job list, done_flag tells us whether we should print only terminated background processes or only unterminated processes
+void jobs(int done_flag) {
     job_t *j = shell_job->next;
     job_t *recent_fg_job;
     while (j) {
@@ -267,15 +310,16 @@ void print_jobs(int done_flag) {
     while (j) {
         if (done_flag) {
             if (j->status == TERMINATED && j->background)
-                printf("[%d]%c Done\t\t%s\n", j->job_num, j == recent_fg_job ? '+' : '-', j->jstr);
+                printf("[%d]%c  Done\t\t%s\n", j->job_num, j == recent_fg_job ? '+' : '-', j->jstr);
         } else {
             if (j->status != TERMINATED)
-                printf("[%d]%c %s\t\t%s\n", j->job_num, j == recent_fg_job ? '+' : '-', j->status == RUNNING ? "Running" : "Stopped", j->jstr);
+                printf("[%d]%c  %s\t\t%s\n", j->job_num, j == recent_fg_job ? '+' : '-', j->status == RUNNING ? "Running" : "Stopped", j->jstr);
         }
         j = j->next;
     }
 }
 
+// frees all memory
 void cleanup() {
     job_t *current = shell_job;
     while (current) {
@@ -290,6 +334,7 @@ void cleanup() {
 }
 
 int main(void) {
+    // shell should ignore all signals
     signal(SIGTTOU, SIG_IGN);
     signal(SIGTTIN, SIG_IGN);
     signal(SIGINT, SIG_IGN);
@@ -311,10 +356,10 @@ int main(void) {
             exit(0);
         }
         update_jobs();
-        print_jobs(1);
+        jobs(1);
         input[strcspn(input, "\n")] = '\0';
         if (!strcmp(input, "jobs")) {
-            print_jobs(0);
+            jobs(0);
         } else if (!strcmp(input, "fg")) {
             fg();
         } else if (!strcmp(input, "bg")) {
