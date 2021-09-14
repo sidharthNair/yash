@@ -71,7 +71,7 @@ void execute_reg(char **argv, job_t *j) {
     if (pid == 0) {
         redirect(argv);
         execvp(*argv, argv);
-        exit(0);
+        exit(1);
     } else {
         wait((int *)NULL);
     }
@@ -86,7 +86,7 @@ void execute_pipe(char **argv, job_t *j) {
         close(pipefd[0]);
         redirect(argv);
         execvp(*argv, argv);
-        exit(0);
+        exit(1);
     }
     int child2 = fork();
     if (child2 == 0) {
@@ -94,7 +94,7 @@ void execute_pipe(char **argv, job_t *j) {
         close(pipefd[1]);
         redirect(argv + (j->pipe + 1));
         execvp(*(argv + (j->pipe + 1)), (argv + (j->pipe + 1)));
-        exit(0);
+        exit(1);
     } else {
         close(pipefd[0]);
         close(pipefd[1]);
@@ -172,6 +172,7 @@ void start_job(char *input) {
     }
 }
 
+// FOR DEBUGGING PURPOSES
 void print_linked_list() {
     job_t *current = shell_job;
     printf("\n\n");
@@ -243,9 +244,9 @@ void bg() {
     if (recent_bg_job == NULL)
         return;
     if (recent_bg_job->jstr[strlen(recent_bg_job->jstr) - 1] == '&') {
-        printf("[%d] %c %s\n", recent_bg_job->job_num, recent_bg_job == recent_fg_job ? '+' : '-', recent_bg_job->jstr);
+        printf("[%d]%c %s\n", recent_bg_job->job_num, recent_bg_job == recent_fg_job ? '+' : '-', recent_bg_job->jstr);
     } else {
-        printf("[%d] %c %s &\n", recent_bg_job->job_num, recent_bg_job == recent_fg_job ? '+' : '-', recent_bg_job->jstr);
+        printf("[%d]%c %s &\n", recent_bg_job->job_num, recent_bg_job == recent_fg_job ? '+' : '-', recent_bg_job->jstr);
     }
     recent_bg_job->status = RUNNING;
     recent_bg_job->background = 1;
@@ -266,12 +267,25 @@ void print_jobs(int done_flag) {
     while (j) {
         if (done_flag) {
             if (j->status == TERMINATED && j->background)
-                printf("[%d] %c Done\t%s\n", j->job_num, j == recent_fg_job ? '+' : '-', j->jstr);
+                printf("[%d]%c Done\t\t%s\n", j->job_num, j == recent_fg_job ? '+' : '-', j->jstr);
         } else {
             if (j->status != TERMINATED)
-                printf("[%d] %c %s\t%s\n", j->job_num, j == recent_fg_job ? '+' : '-', j->status == RUNNING ? "Running" : "Stopped", j->jstr);
+                printf("[%d]%c %s\t\t%s\n", j->job_num, j == recent_fg_job ? '+' : '-', j->status == RUNNING ? "Running" : "Stopped", j->jstr);
         }
         j = j->next;
+    }
+}
+
+void cleanup() {
+    job_t *current = shell_job;
+    while (current) {
+        if (current->status != TERMINATED) {
+            kill(-current->pgid, SIGQUIT);
+        }
+        job_t *next = current->next;
+        free(current->jstr);
+        free(current);
+        current = next;
     }
 }
 
@@ -288,12 +302,14 @@ int main(void) {
     shell_job = malloc(sizeof(job_t));
     shell_job->status = RUNNING;
     shell_job->pgid = s_pid;
-    shell_job->jstr = "shell";
+    shell_job->jstr = strdup("shell");
     while (1) {
         write(1, "# ", 2);
         char input[2048];
-        if (fgets(input, 2048, stdin) == NULL)
-            exit(1);
+        if (fgets(input, 2048, stdin) == NULL) {
+            cleanup();
+            exit(0);
+        }
         update_jobs();
         print_jobs(1);
         input[strcspn(input, "\n")] = '\0';
