@@ -84,7 +84,7 @@ void redirect(char **argv) {
             if (!*argv) {
                 exit(1);
             }
-            int new_stdout = open(*(argv++), O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
+            int new_stdout = open(*(argv++), O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
             dup2(new_stdout, 1);
             close(new_stdout);
         } else if (!strcmp(token, "2>")) {
@@ -93,7 +93,7 @@ void redirect(char **argv) {
             if (!*argv) {
                 exit(1);
             }
-            int new_stderr = open(*(argv++), O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
+            int new_stderr = open(*(argv++), O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
             dup2(new_stderr, 2);
             close(new_stderr);
         } else {
@@ -169,8 +169,7 @@ void start_job(char *input) {
             }
             argv[i] = NULL;
             j->pipe = i;
-        }
-        else if (!strcmp(argv[i], "&")) { // & error, invalid command
+        } else if (!strcmp(argv[i], "&")) {  // & error, invalid command
             free(j->jstr);
             free(j);
             return;
