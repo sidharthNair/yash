@@ -154,27 +154,26 @@ void start_job(char *input) {
     j->background = 0;
     char *argv[128];
     int length = tokenize(input, argv);
-    if (strchr(j->jstr, '&')) {
-        if (!strcmp(argv[length - 1], "&")) {
-            argv[length-- - 1] = NULL;
-            j->background = 1;
-        } else {
-            free(j->jstr);
-            free(j);
-            return;
-        }
+    if (!strcmp(argv[length - 1], "&")) {
+        argv[length-- - 1] = NULL;
+        j->background = 1;
     } else {
         argv[length] = NULL;
     }
     for (int i = 0; i < length; i++) {
         if (!strcmp(argv[i], "|")) {
-            if (j->pipe) {  // multiple pipes found, invalid command
+            if (j->pipe || i == length - 1) {  // pipe error, invalid command
                 free(j->jstr);
                 free(j);
                 return;
             }
             argv[i] = NULL;
             j->pipe = i;
+        }
+        else if (!strcmp(argv[i], "&")) { // & error, invalid command
+            free(j->jstr);
+            free(j);
+            return;
         }
     }
     job_t *current = shell_job;
