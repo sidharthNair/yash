@@ -249,9 +249,9 @@ void update_jobs() {
 // brings most recently stopped or backgrounded process to the foreground
 void fg() {
     job_t *j = shell_job->next;
-    job_t *recent_fg_job;
+    job_t *recent_fg_job = NULL;
     while (j) {
-        if (j->status == STOPPED || j->background) {
+        if (j->status == STOPPED || (j->background && j->status != TERMINATED)) {
             recent_fg_job = j;
         }
         j = j->next;
@@ -277,8 +277,8 @@ void fg() {
 // starts up most recently stopped process in the background
 void bg() {
     job_t *j = shell_job->next;
-    job_t *recent_bg_job;
-    job_t *recent_fg_job;
+    job_t *recent_bg_job = NULL;
+    job_t *recent_fg_job = NULL;
     while (j) {
         if (j->status == STOPPED || j->background) {
             recent_fg_job = j;
