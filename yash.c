@@ -154,9 +154,15 @@ void start_job(char *input) {
     j->background = 0;
     char *argv[128];
     int length = tokenize(input, argv);
-    if (!strcmp(argv[length - 1], "&")) {
-        argv[length-- - 1] = NULL;
-        j->background = 1;
+    if (strchr(j->jstr, '&')) {
+        if (!strcmp(argv[length - 1], "&")) {
+            argv[length-- - 1] = NULL;
+            j->background = 1;
+        } else {
+            free(j->jstr);
+            free(j);
+            return;
+        }
     } else {
         argv[length] = NULL;
     }
